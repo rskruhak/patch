@@ -1,0 +1,95 @@
+---
+- name: Patch RHEL 9 Systems
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Set to 'yes' to reboot after patching if needed
+    reboot_after_update: no
+    # Reboot timeout in seconds
+    reboot_timeout: 600
+    
+  tasks:
+    - name: Ensure system is RHEL 9
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "RedHat"
+          - ansible_distribution_major_version == "9"
+        fail_msg: "This playbook is designed for RHEL 9 only"
+        
+    - name: Check for available updates
+      ansible.builtin.dnf:
+        list: updates
+      register: available_updates
+      
+    - name: Display number of available updates
+      ansible.builtin.debug:
+        msg: "{{ available_updates.results | length }} updates available"
+        
+    - name: Update all packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_cache: yes
+      register: update_result
+      
+    - name: Display update results
+      ansible.builtin.debug:
+        msg: "Packages updated successfully"
+      when: update_result.changed
+      
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+      
+    - name: Check if kernel was updated
+      ansible.builtin.shell: |
+        LAST_KERNEL=$(rpm -q --last kernel | head -1 | awk '{print $1}')
+        CURRENT_KERNEL=$(uname -r)
+        if [[ $LAST_KERNEL != *"$CURRENT_KERNEL"* ]]; then
+          echo "reboot_needed"
+        else
+          echo "no_reboot_needed"
+        fi
+      register: kernel_check
+      changed_when: false
+      
+    - name: Set reboot needed fact
+      ansible.builtin.set_fact:
+        needs_reboot: "{{ kernel_check.stdout == 'reboot_needed' or reboot_required_file.stat.exists }}"
+        
+    - name: Display reboot status
+      ansible.builtin.debug:
+        msg: "System requires reboot: {{ needs_reboot }}"
+        
+    - name: Reboot system if needed and requested
+      ansible.builtin.reboot:
+        msg: "Rebooting system after updates"
+        reboot_timeout: "{{ reboot_timeout }}"
+      when:
+        - needs_reboot | bool
+        - reboot_after_update | bool
+        
+    - name: Wait for system to come back online
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: "{{ reboot_timeout }}"
+      when:
+        - needs_reboot | bool
+        - reboot_after_update | bool
+        
+    - name: Verify system is accessible after reboot
+      ansible.builtin.ping:
+      when:
+        - needs_reboot | bool
+        - reboot_after_update | bool
+        
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          Patching complete!
+          Updates installed: {{ update_result.changed }}
+          Reboot required: {{ needs_reboot }}
+          System rebooted: {{ reboot_after_update and needs_reboot }}
